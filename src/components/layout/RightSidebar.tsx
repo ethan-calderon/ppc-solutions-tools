@@ -8,7 +8,7 @@ const navItems = [
 
 export function RightSidebar() {
   return (
-    <aside className="hidden lg:flex lg:w-72 lg:flex-col border-l bg-white text-black">
+    <aside className="w-72 flex flex-col border-l bg-white text-black">
       <div className="p-4 border-b">
         <div className="text-sm font-semibold">PPC Tools</div>
         <div className="text-xs mt-1">Choose a tool</div>
