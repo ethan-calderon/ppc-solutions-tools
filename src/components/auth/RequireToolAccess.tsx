@@ -4,13 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type ToolRow = {
-  id: string;
-  slug: string;
-  is_free: boolean;
-  is_active: boolean;
-};
-
 function slugFromPath(pathname: string) {
   const parts = pathname.split("/").filter(Boolean);
   const idx = parts.indexOf("app");
@@ -34,13 +27,18 @@ export function RequireToolAccess({
   const router = useRouter();
   const pathname = usePathname();
 
-  const resolvedSlug = useMemo(() => toolSlug ?? slugFromPath(pathname), [toolSlug, pathname]);
+  const resolvedSlug = useMemo(
+    () => toolSlug ?? slugFromPath(pathname),
+    [toolSlug, pathname]
+  );
+
   const [allowed, setAllowed] = useState<boolean | null>(null);
 
   useEffect(() => {
     const run = async () => {
       setAllowed(null);
 
+      // Must be logged in
       const { data: sessionData } = await supabase.auth.getSession();
       const session = sessionData.session;
       if (!session) {
@@ -51,26 +49,32 @@ export function RequireToolAccess({
       const userId = session.user.id;
       const email = session.user.email ?? null;
 
-      const { data: prof } = await supabase
+      // Load profile (tester + active workspace)
+      const { data: prof, error: profErr } = await supabase
         .from("profiles")
-        .select("is_internal_tester, email")
+        .select("email, is_internal_tester, active_workspace_id")
         .eq("id", userId)
         .maybeSingle();
 
+      if (profErr) {
+        console.error("Profile fetch error:", profErr.message);
+      }
+
       const tester =
-        Boolean(prof?.is_internal_tester) ||
-        isTesterEmail(prof?.email ?? email);
+        Boolean(prof?.is_internal_tester) || isTesterEmail(prof?.email ?? email);
 
       if (tester) {
         setAllowed(true);
         return;
       }
 
+      // If we can't resolve a slug, allow (non-tool routes)
       if (!resolvedSlug) {
         setAllowed(true);
         return;
       }
 
+      // Load tool definition
       const { data: tool, error: toolErr } = await supabase
         .from("tools")
         .select("id, slug, is_free, is_active")
@@ -82,20 +86,26 @@ export function RequireToolAccess({
         return;
       }
 
+      // Free tool => allowed
       if (tool.is_free) {
         setAllowed(true);
         return;
       }
 
-      const { data: membership } = await supabase
-        .from("workspace_members")
-        .select("workspace_id")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: true })
-        .limit(1)
-        .maybeSingle();
+      // Paid tool => require entitlement for ACTIVE workspace
+      let wsId = prof?.active_workspace_id ?? null;
 
-      const wsId = membership?.workspace_id;
+      // If missing, ask DB to set it (one-time)
+      if (!wsId) {
+        const { data: ensured, error: ensureErr } = await supabase.rpc(
+          "ensure_active_workspace"
+        );
+        if (ensureErr) {
+          console.error("ensure_active_workspace error:", ensureErr.message);
+        }
+        wsId = ensured ?? null;
+      }
+
       if (!wsId) {
         router.replace("/app/tool-store");
         return;
