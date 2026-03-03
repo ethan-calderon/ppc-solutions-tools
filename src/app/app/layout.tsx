@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
-import { RightSidebar } from "@/components/layout/RightSidebar";
+import { RightSidebar, type NavTool } from "@/components/layout/RightSidebar";
+import { UserMenu } from "@/components/layout/UserMenu";
 
 type AppUser = {
   id: string;
@@ -13,12 +14,10 @@ type AppUser = {
 type SubscriptionBadge = "Tester" | "Free" | "Silver" | "Gold";
 
 function getBadgeStyles(badge: SubscriptionBadge) {
-  // “emerald looking” for Tester, “bronze” for Free, “silver” for Silver, “gold” for Gold
   switch (badge) {
     case "Tester":
       return "border-emerald-300 bg-emerald-50 text-emerald-800";
     case "Free":
-      // bronze-ish: warm amber/brown
       return "border-amber-300 bg-amber-50 text-amber-800";
     case "Silver":
       return "border-gray-300 bg-gray-50 text-gray-700";
@@ -29,33 +28,22 @@ function getBadgeStyles(badge: SubscriptionBadge) {
   }
 }
 
-/**
- * MVP tier logic (correct today):
- * - Tester if internal domain
- * - Otherwise Free
- *
- * Future (when we add entitlements/tools):
- * - Silver: 1–2 tools active
- * - Gold: all tools active
- */
 function computeSubscriptionBadge(args: {
   isInternalTester: boolean;
-  activeToolCount?: number; // future
-  totalToolCount?: number; // future
+  activePaidToolCount?: number; // future (entitlements)
+  totalPaidToolCount?: number; // future (tools registry)
 }): SubscriptionBadge {
   if (args.isInternalTester) return "Tester";
 
-  const active = args.activeToolCount ?? 0;
-  const total = args.totalToolCount ?? 0;
+  const active = args.activePaidToolCount ?? 0;
+  const total = args.totalPaidToolCount ?? 0;
 
-  // Only apply Silver/Gold when we actually know counts (future)
+  // Only meaningful once entitlements exist. Still safe to compute now.
   if (total > 0) {
     if (active >= total) return "Gold";
     if (active >= 1 && active <= 2) return "Silver";
-    return "Free";
   }
 
-  // Default today (no entitlements wired yet)
   return "Free";
 }
 
@@ -65,11 +53,17 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<AppUser | null>(null);
 
+  const [workspaceId, setWorkspaceId] = useState<string>("");
   const [workspaceName, setWorkspaceName] = useState<string>("Workspace");
+
   const [subscriptionBadge, setSubscriptionBadge] =
     useState<SubscriptionBadge>("Free");
 
+  const [navTools, setNavTools] = useState<NavTool[]>([]);
+
   async function loadAppData() {
+    setReady(false);
+
     // 1) Session
     const { data: sessionData, error: sessionError } =
       await supabase.auth.getSession();
@@ -101,43 +95,119 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     if (profileError) {
       console.error("Profile fetch error:", profileError.message);
     } else {
-      // Prefer profile email if session email is missing
       u.email = u.email ?? profile?.email ?? null;
-
-      const emailForDomainCheck = (u.email ?? profile?.email ?? "").toLowerCase();
-const isInternalTester =
-  Boolean(profile?.is_internal_tester) ||
-  emailForDomainCheck.endsWith("@ogol.net") ||
-  emailForDomainCheck.endsWith("@ppc-solutions.com");
-
-      // Today: Tester vs Free
-      // Future: compute Silver/Gold once entitlements/tools exist
-      const badge = computeSubscriptionBadge({
-        isInternalTester,
-        // activeToolCount: ??? (future)
-        // totalToolCount: ??? (future)
-      });
-
-      setSubscriptionBadge(badge);
     }
+
+    // Domain fallback (even if DB flag is wrong)
+    const emailForDomainCheck = (u.email ?? profile?.email ?? "").toLowerCase();
+    const isInternalTester =
+      Boolean(profile?.is_internal_tester) ||
+      emailForDomainCheck.endsWith("@ogol.net") ||
+      emailForDomainCheck.endsWith("@ppc-solutions.com");
 
     setUser(u);
 
-    // 3) Workspace name (owner’s first workspace)
-    const { data: ws, error: wsError } = await supabase
-      .from("workspaces")
-      .select("name")
-      .eq("owner_id", u.id)
+    // 3) Workspace via membership (correct for owners + seats)
+    const { data: membership, error: memberError } = await supabase
+      .from("workspace_members")
+      .select("workspace_id")
+      .eq("user_id", u.id)
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle();
 
-    if (wsError) {
-      console.error("Workspace fetch error:", wsError.message);
+    if (memberError || !membership?.workspace_id) {
+      console.error("Membership fetch error:", memberError?.message);
+      setWorkspaceId("");
       setWorkspaceName("Workspace");
-    } else {
-      setWorkspaceName(ws?.name || "Workspace");
+      setSubscriptionBadge(computeSubscriptionBadge({ isInternalTester }));
+      setNavTools([]);
+      setReady(true);
+      return;
     }
+
+    const wsId = membership.workspace_id;
+
+    const { data: ws, error: wsError } = await supabase
+      .from("workspaces")
+      .select("id, name")
+      .eq("id", wsId)
+      .maybeSingle();
+
+    if (wsError || !ws?.id) {
+      console.error("Workspace fetch error:", wsError?.message);
+      setWorkspaceId(wsId);
+      setWorkspaceName("Workspace");
+      setSubscriptionBadge(computeSubscriptionBadge({ isInternalTester }));
+      setNavTools([]);
+      setReady(true);
+      return;
+    }
+
+    setWorkspaceId(ws.id);
+    setWorkspaceName(ws.name || "Workspace");
+
+    // 4) Tools registry
+    const { data: tools, error: toolsError } = await supabase
+      .from("tools")
+      .select("id, slug, name, is_free, is_active, sort_order")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+
+    if (toolsError) {
+      console.error("Tools fetch error:", toolsError.message);
+      setSubscriptionBadge(computeSubscriptionBadge({ isInternalTester }));
+      setNavTools([]);
+      setReady(true);
+      return;
+    }
+
+    const activeTools = tools ?? [];
+    const freeTools = activeTools.filter((t) => t.is_free);
+    const paidTools = activeTools.filter((t) => !t.is_free);
+
+    // 5) Entitlements for paid tools (skip if tester)
+    let entitledToolIds = new Set<string>();
+
+    if (!isInternalTester && paidTools.length > 0) {
+      const { data: ents, error: entsError } = await supabase
+        .from("workspace_entitlements")
+        .select("tool_id")
+        .eq("workspace_id", wsId);
+
+      if (entsError) {
+        console.error("Entitlements fetch error:", entsError.message);
+      } else {
+        entitledToolIds = new Set((ents ?? []).map((e) => e.tool_id));
+      }
+    }
+
+    // 6) Visible tools
+    const visibleTools = isInternalTester
+      ? activeTools
+      : [...freeTools, ...paidTools.filter((t) => entitledToolIds.has(t.id))];
+
+    setNavTools(
+      visibleTools.map((t) => ({
+        slug: t.slug,
+        name: t.name,
+      }))
+    );
+
+    // Badge now + future readiness
+    const activePaidToolCount = isInternalTester
+      ? paidTools.length
+      : paidTools.filter((t) => entitledToolIds.has(t.id)).length;
+
+    const totalPaidToolCount = paidTools.length;
+
+    setSubscriptionBadge(
+      computeSubscriptionBadge({
+        isInternalTester,
+        activePaidToolCount,
+        totalPaidToolCount,
+      })
+    );
 
     setReady(true);
   }
@@ -152,7 +222,6 @@ const isInternalTester =
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!session) router.replace("/login");
-      // If a session appears (login), reload user/workspace/badge
       else loadAppData();
     });
 
@@ -182,7 +251,7 @@ const isInternalTester =
             </div>
 
             <div className="flex items-center gap-3">
-              {/* Badge always shows */}
+              {/* badge stays visible on the button + also available separately if you want later */}
               <span
                 className={`text-[10px] px-2 py-0.5 border rounded-full ${getBadgeStyles(
                   subscriptionBadge
@@ -192,26 +261,17 @@ const isInternalTester =
                 {subscriptionBadge}
               </span>
 
-              {user?.email ? (
-                <div className="text-xs text-black/70">{user.email}</div>
-              ) : null}
-
-              <button
-                className="text-sm underline"
-                onClick={async () => {
-                  await supabase.auth.signOut();
-                  router.replace("/login");
-                }}
-              >
-                Log out
-              </button>
+              <UserMenu
+                email={user?.email ?? ""}
+                badge={subscriptionBadge}
+              />
             </div>
           </header>
 
           <div>{children}</div>
         </div>
 
-        <RightSidebar />
+        <RightSidebar tools={navTools} />
       </div>
     </div>
   );

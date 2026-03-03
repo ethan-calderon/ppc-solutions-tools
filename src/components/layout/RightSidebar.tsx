@@ -1,12 +1,22 @@
 import Link from "next/link";
 
-const navItems = [
-  { href: "/app/campaign-builder", label: "Campaign Builder", badge: "MVP" },
-  { href: "/app/utm-builder", label: "UTM Builder" },
-  { href: "/app/settings", label: "Settings" },
-];
+export type NavTool = {
+  slug: string;
+  name: string;
+};
 
-export function RightSidebar() {
+function toolPath(slug: string) {
+  switch (slug) {
+    case "campaign-builder":
+      return "/app/campaign-builder";
+    case "utm-builder":
+      return "/app/utm-builder";
+    default:
+      return "/app";
+  }
+}
+
+export function RightSidebar({ tools }: { tools: NavTool[] }) {
   return (
     <aside className="w-72 flex flex-col border-l bg-white text-black">
       <div className="p-4 border-b">
@@ -15,24 +25,25 @@ export function RightSidebar() {
       </div>
 
       <nav className="p-3 space-y-1">
-        {navItems.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-gray-100"
-          >
-            <span>{item.label}</span>
-            {item.badge ? (
-              <span className="text-[10px] rounded-full bg-black text-white px-2 py-0.5">
-                {item.badge}
-              </span>
-            ) : null}
-          </Link>
-        ))}
+        {tools.length === 0 ? (
+          <div className="text-sm p-3 border rounded-md">
+            No tools available.
+          </div>
+        ) : (
+          tools.map((t) => (
+            <Link
+              key={t.slug}
+              href={toolPath(t.slug)}
+              className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-gray-100"
+            >
+              <span>{t.name}</span>
+            </Link>
+          ))
+        )}
       </nav>
 
       <div className="mt-auto p-4 border-t text-xs">
-        v0.0.1 • Local dev
+        v0.0.1 • Dev build
       </div>
     </aside>
   );
