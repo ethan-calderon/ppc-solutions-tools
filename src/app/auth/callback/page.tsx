@@ -9,7 +9,6 @@ export default function AuthCallbackPage() {
 
   useEffect(() => {
     const run = async () => {
-      // Supabase magic link hits this page with ?code=...
       const url = new URL(window.location.href);
       const code = url.searchParams.get("code");
 
@@ -22,16 +21,11 @@ export default function AuthCallbackPage() {
         }
       }
 
-      // If already logged in, or exchange succeeded, send to app
       router.replace("/app");
     };
 
     run();
   }, [router]);
 
-  return (
-    <div className="p-6 text-sm">
-      Signing you in…
-    </div>
-  );
+  return <div className="p-6 text-sm text-black">Signing you in…</div>;
 }
