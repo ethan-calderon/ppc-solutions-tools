@@ -30,8 +30,8 @@ function getBadgeStyles(badge: SubscriptionBadge) {
 
 function computeSubscriptionBadge(args: {
   isInternalTester: boolean;
-  activePaidToolCount?: number; // future (entitlements)
-  totalPaidToolCount?: number; // future (tools registry)
+  activePaidToolCount?: number;
+  totalPaidToolCount?: number;
 }): SubscriptionBadge {
   if (args.isInternalTester) return "Tester";
 
@@ -84,10 +84,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       email: session.user.email ?? null,
     };
 
-    // 2) Profile (email + internal tester flag + active workspace)
+    // 2) Profile (email + internal tester flag + onboarding gate)
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
-      .select("email, is_internal_tester, active_workspace_id")
+      .select("email, is_internal_tester, onboarding_complete")
       .eq("id", u.id)
       .maybeSingle();
 
@@ -95,6 +95,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       console.error("Profile fetch error:", profileError.message);
     } else {
       u.email = u.email ?? profile?.email ?? null;
+    }
+
+    // Onboarding gate (must happen BEFORE loading workspace/tools)
+    if (!profile?.onboarding_complete) {
+      router.replace("/onboarding");
+      return;
     }
 
     const emailForDomainCheck = (u.email ?? profile?.email ?? "").toLowerCase();
@@ -105,24 +111,17 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
     setUser(u);
 
-    // 3) Active workspace (primary source)
-    let wsId: string | null = (profile?.active_workspace_id as string | null) ?? null;
+    // 3) Workspace via membership
+    const { data: membership, error: memberError } = await supabase
+      .from("workspace_members")
+      .select("workspace_id")
+      .eq("user_id", u.id)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
 
-    // If missing, ask DB to set it from earliest membership (one-time)
-    if (!wsId) {
-      const { data: ensured, error: ensureErr } = await supabase.rpc(
-        "ensure_active_workspace"
-      );
-
-      if (ensureErr) {
-        console.error("ensure_active_workspace error:", ensureErr.message);
-      } else {
-        wsId = (ensured as string | null) ?? null;
-      }
-    }
-
-    if (!wsId) {
-      // User has no workspace (should be rare; usually provisioning did not complete)
+    if (memberError || !membership?.workspace_id) {
+      console.error("Membership fetch error:", memberError?.message);
       setWorkspaceId("");
       setWorkspaceName("Workspace");
       setSubscriptionBadge(computeSubscriptionBadge({ isInternalTester }));
@@ -131,9 +130,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    setWorkspaceId(wsId);
+    const wsId = membership.workspace_id;
 
-    // 4) Workspace name (by active workspace id)
     const { data: ws, error: wsError } = await supabase
       .from("workspaces")
       .select("id, name")
@@ -142,12 +140,18 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
     if (wsError || !ws?.id) {
       console.error("Workspace fetch error:", wsError?.message);
+      setWorkspaceId(wsId);
       setWorkspaceName("Workspace");
-    } else {
-      setWorkspaceName(ws.name || "Workspace");
+      setSubscriptionBadge(computeSubscriptionBadge({ isInternalTester }));
+      setNavTools([]);
+      setReady(true);
+      return;
     }
 
-    // 5) Tools registry
+    setWorkspaceId(ws.id);
+    setWorkspaceName(ws.name || "Workspace");
+
+    // 4) Tools registry
     const { data: tools, error: toolsError } = await supabase
       .from("tools")
       .select("id, slug, name, is_free, is_active, sort_order")
@@ -161,18 +165,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       setReady(true);
       return;
     }
-    console.log("[TOOLS DEBUG]", {
-  isInternalTester,
-  toolsCount: (tools ?? []).length,
-  toolSlugs: (tools ?? []).map((t) => t.slug),
-  wsId,
-});
 
     const activeTools = tools ?? [];
     const freeTools = activeTools.filter((t) => t.is_free);
     const paidTools = activeTools.filter((t) => !t.is_free);
 
-    // 6) Entitlements (active workspace) — skip if tester
+    // 5) Entitlements for paid tools (skip if tester)
     let entitledToolIds = new Set<string>();
 
     if (!isInternalTester && paidTools.length > 0) {
@@ -188,7 +186,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // 7) Visible tools
+    // 6) Visible tools
     const visibleTools = isInternalTester
       ? activeTools
       : [...freeTools, ...paidTools.filter((t) => entitledToolIds.has(t.id))];
@@ -200,7 +198,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       }))
     );
 
-    // 8) Badge compute
     const activePaidToolCount = isInternalTester
       ? paidTools.length
       : paidTools.filter((t) => entitledToolIds.has(t.id)).length;
