@@ -41,7 +41,6 @@ export default function OnboardingPage() {
       );
     }
 
-    // business
     return (
       businessName.trim().length > 0 &&
       businessWebsite.trim().length > 0 &&
@@ -70,13 +69,15 @@ export default function OnboardingPage() {
         return;
       }
 
-      const { data: profile } = await supabase
+      const { data: profile, error } = await supabase
         .from("profiles")
         .select(
           "onboarding_complete, account_type, first_name, last_name, phone, business_name, business_website, business_phone, business_address, notification_opt_in"
         )
         .eq("id", session.user.id)
         .maybeSingle();
+
+      if (error) console.error(error.message);
 
       if (profile?.onboarding_complete) {
         router.replace("/app");
@@ -85,15 +86,19 @@ export default function OnboardingPage() {
 
       // Prefill if user partially filled before
       if (profile?.account_type) setAccountType(profile.account_type as AccountType);
+
       if (profile?.first_name) setFirstName(profile.first_name);
       if (profile?.last_name) setLastName(profile.last_name);
       if (profile?.phone) setPhone(profile.phone);
+
       if (profile?.business_name) setBusinessName(profile.business_name);
       if (profile?.business_website) setBusinessWebsite(profile.business_website);
       if (profile?.business_phone) setBusinessPhone(profile.business_phone);
       if (profile?.business_address) setBusinessAddress(profile.business_address);
-      if (typeof profile?.notification_opt_in === "boolean")
+
+      if (typeof profile?.notification_opt_in === "boolean") {
         setNotificationOptIn(profile.notification_opt_in);
+      }
 
       setLoading(false);
     };
@@ -102,77 +107,84 @@ export default function OnboardingPage() {
   }, [router]);
 
   async function submit() {
-  if (!canContinue) return;
+    if (!canContinue) return;
 
-  setSaving(true);
+    setSaving(true);
 
-  const { data } = await supabase.auth.getSession();
-  const session = data.session;
+    const { data } = await supabase.auth.getSession();
+    const session = data.session;
 
-  if (!session) {
-    router.replace("/login");
-    return;
-  }
+    if (!session) {
+      router.replace("/login");
+      return;
+    }
 
-  const userId = session.user.id;
+    const userId = session.user.id;
 
-  if (accountType === "single") {
-    const { error } = await supabase
-      .from("profiles")
-      .update({
-        account_type: "single",
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        phone: phone.trim(),
-        business_name: null,
-        business_website: null,
-        business_phone: null,
-        business_address: null,
-        notification_opt_in: notificationOptIn,
-        accepted_terms_at: new Date().toISOString(),
-        onboarding_complete: true,
-      })
-      .eq("id", userId);
+    // Common fields
+    const acceptedTermsAt = new Date().toISOString();
+
+    if (accountType === "single") {
+      // Single: completes onboarding immediately
+      const { error } = await supabase
+        .from("profiles")
+        .update({
+          account_type: "single",
+          first_name: firstName.trim(),
+          last_name: lastName.trim(),
+          phone: phone.trim(),
+
+          business_name: null,
+          business_website: null,
+          business_phone: null,
+          business_address: null,
+
+          notification_opt_in: notificationOptIn,
+          accepted_terms_at: acceptedTermsAt,
+          onboarding_complete: true,
+        })
+        .eq("id", userId);
+
+      setSaving(false);
+
+      if (error) {
+        alert(`Save failed: ${error.message}`);
+        return;
+      }
+
+      router.replace("/app");
+      return;
+    }
+
+    // Business: finalize via API route (creates workspace + admin membership + sets active_workspace_id + marks onboarding_complete true)
+    const res = await fetch("/api/onboarding/business", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        businessName: businessName.trim(),
+        businessWebsite: businessWebsite.trim(),
+        businessPhone: businessPhone.trim(),
+        businessAddress: businessAddress.trim(),
+        notificationOptIn,
+        // Invite UI comes next step. For now it's empty but supported by API.
+        invites: [],
+        acceptedTermsAt,
+      }),
+    });
 
     setSaving(false);
 
-    if (error) {
-      alert(`Save failed: ${error.message}`);
+    if (!res.ok) {
+      const msg = await res.text();
+      alert(`Business setup failed: ${msg}`);
       return;
     }
 
     router.replace("/app");
-    return;
   }
-
-  // BUSINESS: do NOT mark onboarding complete here.
-  // We finalize via server route that creates workspace + admin membership + invites + sets active workspace.
-  const res = await fetch("/api/onboarding/business", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
-      businessName,
-      businessWebsite,
-      businessPhone,
-      businessAddress,
-      notificationOptIn,
-      invites: [], // Step 2.6 will add UI for invites; we keep empty for now.
-    }),
-  });
-
-  setSaving(false);
-
-  if (!res.ok) {
-    const msg = await res.text();
-    alert(`Business setup failed: ${msg}`);
-    return;
-  }
-
-  router.replace("/app");
-}
 
   if (loading) {
     return (
@@ -199,9 +211,7 @@ export default function OnboardingPage() {
             }`}
           >
             <div className="font-medium">Single account</div>
-            <div className="text-sm text-black/70 mt-1">
-              One person using tools (no seats).
-            </div>
+            <div className="text-sm text-black/70 mt-1">One person (no seats).</div>
           </button>
 
           <button
@@ -315,7 +325,7 @@ export default function OnboardingPage() {
             />
             <span>
               I agree to the Terms and Conditions.
-              <span className="text-black/60"> (we’ll add the link next)</span>
+              <span className="text-black/60"> (link coming next)</span>
             </span>
           </label>
 
@@ -326,9 +336,7 @@ export default function OnboardingPage() {
               checked={notificationOptIn}
               onChange={(e) => setNotificationOptIn(e.target.checked)}
             />
-            <span>
-              I want to receive notification emails (no marketing).
-            </span>
+            <span>I want to receive notification emails (no marketing).</span>
           </label>
         </div>
 
