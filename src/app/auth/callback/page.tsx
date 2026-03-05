@@ -1,31 +1,29 @@
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 export default function AuthCallbackPage() {
-  const router = useRouter();
-
   useEffect(() => {
     const run = async () => {
+      // Supabase OAuth returns a "code" in the URL. Exchange it for a session.
       const url = new URL(window.location.href);
       const code = url.searchParams.get("code");
 
       if (code) {
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (error) {
-          console.error("Auth callback error:", error.message);
-          router.replace("/login");
-          return;
-        }
+        await supabase.auth.exchangeCodeForSession(window.location.href);
       }
 
-      router.replace("/app");
+      // After session is established, send user into the app.
+      window.location.replace("/app");
     };
 
     run();
-  }, [router]);
+  }, []);
 
-  return <div className="p-6 text-sm text-black">Signing you in…</div>;
+  return (
+    <main className="min-h-screen flex items-center justify-center bg-white text-black p-6">
+      <div className="text-sm">Signing you in…</div>
+    </main>
+  );
 }
