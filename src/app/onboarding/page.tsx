@@ -102,48 +102,37 @@ export default function OnboardingPage() {
   }, [router]);
 
   async function submit() {
-    if (!canContinue) return;
+  if (!canContinue) return;
 
-    setSaving(true);
+  setSaving(true);
 
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
+  const { data } = await supabase.auth.getSession();
+  const session = data.session;
 
-    if (!session) {
-      router.replace("/login");
-      return;
-    }
+  if (!session) {
+    router.replace("/login");
+    return;
+  }
 
-    const userId = session.user.id;
+  const userId = session.user.id;
 
-    const baseUpdate: any = {
-      account_type: accountType,
-      notification_opt_in: notificationOptIn,
-      accepted_terms_at: new Date().toISOString(),
-      onboarding_complete: true, // In 2.5 we'll gate this until workspace is created for business
-    };
-
-    if (accountType === "single") {
-      baseUpdate.first_name = firstName.trim();
-      baseUpdate.last_name = lastName.trim();
-      baseUpdate.phone = phone.trim();
-
-      baseUpdate.business_name = null;
-      baseUpdate.business_website = null;
-      baseUpdate.business_phone = null;
-      baseUpdate.business_address = null;
-    } else {
-      baseUpdate.business_name = businessName.trim();
-      baseUpdate.business_website = businessWebsite.trim();
-      baseUpdate.business_phone = businessPhone.trim();
-      baseUpdate.business_address = businessAddress.trim();
-
-      baseUpdate.first_name = null;
-      baseUpdate.last_name = null;
-      baseUpdate.phone = null;
-    }
-
-    const { error } = await supabase.from("profiles").update(baseUpdate).eq("id", userId);
+  if (accountType === "single") {
+    const { error } = await supabase
+      .from("profiles")
+      .update({
+        account_type: "single",
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        phone: phone.trim(),
+        business_name: null,
+        business_website: null,
+        business_phone: null,
+        business_address: null,
+        notification_opt_in: notificationOptIn,
+        accepted_terms_at: new Date().toISOString(),
+        onboarding_complete: true,
+      })
+      .eq("id", userId);
 
     setSaving(false);
 
@@ -152,9 +141,38 @@ export default function OnboardingPage() {
       return;
     }
 
-    // Next step: we'll add 2FA + business workspace setup
     router.replace("/app");
+    return;
   }
+
+  // BUSINESS: do NOT mark onboarding complete here.
+  // We finalize via server route that creates workspace + admin membership + invites + sets active workspace.
+  const res = await fetch("/api/onboarding/business", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      businessName,
+      businessWebsite,
+      businessPhone,
+      businessAddress,
+      notificationOptIn,
+      invites: [], // Step 2.6 will add UI for invites; we keep empty for now.
+    }),
+  });
+
+  setSaving(false);
+
+  if (!res.ok) {
+    const msg = await res.text();
+    alert(`Business setup failed: ${msg}`);
+    return;
+  }
+
+  router.replace("/app");
+}
 
   if (loading) {
     return (
