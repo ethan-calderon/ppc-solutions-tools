@@ -1,129 +1,150 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+function getSupabaseFromRequest(req: Request) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl) throw new Error("Missing env: NEXT_PUBLIC_SUPABASE_URL");
+  if (!supabaseAnonKey) throw new Error("Missing env: NEXT_PUBLIC_SUPABASE_ANON_KEY");
+
+  // We rely on the caller sending an auth token:
+  // Authorization: Bearer <access_token>
+  const authHeader = req.headers.get("authorization") ?? "";
+
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    global: {
+      headers: {
+        Authorization: authHeader,
+      },
+    },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
 export async function POST(req: Request) {
   try {
-    const authHeader = req.headers.get("authorization") || "";
-    const token = authHeader.startsWith("Bearer ")
-      ? authHeader.slice("Bearer ".length)
-      : "";
+    const supabase = getSupabaseFromRequest(req);
 
-    if (!token) {
-      return new NextResponse("Missing auth token", { status: 401 });
-    }
-
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-      auth: { persistSession: false },
-    });
-
+    // Verify the user is authenticated (via Authorization header)
     const { data: userData, error: userErr } = await supabase.auth.getUser();
-    if (userErr || !userData.user) {
-      return new NextResponse("Invalid session", { status: 401 });
+    if (userErr || !userData?.user) {
+      return new NextResponse("Not authenticated", { status: 401 });
     }
 
-    const userId = userData.user.id;
-    const body = await req.json();
+    const user = userData.user;
 
-    const {
-      businessName,
-      businessWebsite,
-      businessPhone,
-      businessAddress,
-      invites,
-      notificationOptIn,
-    } = body as {
-      businessName: string;
-      businessWebsite: string;
-      businessPhone: string;
-      businessAddress: string;
-      notificationOptIn: boolean;
-      invites?: Array<{ email: string; role: "admin" | "member" }>;
-    };
+    // Parse body
+    const body = await req.json().catch(() => null);
+    if (!body) return new NextResponse("Invalid JSON body", { status: 400 });
 
-    // 1) Create workspace
-    const { data: ws, error: wsErr } = await supabase
+    const businessName = String(body.businessName ?? "").trim();
+    const website = String(body.website ?? "").trim();
+    const phone = String(body.phone ?? "").trim();
+    const address = String(body.address ?? "").trim();
+
+    // Optional invites: [{ email, role }]
+    const invites = Array.isArray(body.invites) ? body.invites : [];
+
+    if (!businessName) {
+      return new NextResponse("businessName is required", { status: 400 });
+    }
+
+    // 1) Create workspace (owner_id must be the authed user)
+    const { data: workspace, error: wsError } = await supabase
       .from("workspaces")
-      .insert([{ name: businessName?.trim() || "Workspace" }])
-      .select("id, name")
+      .insert({
+        name: businessName,
+        owner_id: user.id,
+      })
+      .select("id, name, owner_id, created_at")
       .single();
 
-    if (wsErr || !ws?.id) {
-      return new NextResponse(`Workspace create failed: ${wsErr?.message}`, {
-        status: 400,
-      });
+    if (wsError || !workspace?.id) {
+      return new NextResponse(
+        `Workspace create failed: ${wsError?.message ?? "Unknown error"}`,
+        { status: 400 }
+      );
     }
 
-    // 2) Create membership (admin)
-    const { error: memErr } = await supabase.from("workspace_members").insert([
-      {
-        workspace_id: ws.id,
-        user_id: userId,
-        role: "admin",
-      },
-    ]);
+    // 2) Create membership row for owner as admin
+    const { error: memError } = await supabase.from("workspace_members").insert({
+      workspace_id: workspace.id,
+      user_id: user.id,
+      role: "admin",
+    });
 
-    if (memErr) {
-      return new NextResponse(`Membership create failed: ${memErr.message}`, {
-        status: 400,
-      });
+    if (memError) {
+      return new NextResponse(
+        `Workspace membership create failed: ${memError.message}`,
+        { status: 400 }
+      );
     }
 
-    // 3) Set active workspace + write business fields + mark onboarding complete
-    const { error: profErr } = await supabase
-      .from("profiles")
-      .update({
-        account_type: "business",
-        business_name: businessName?.trim() || null,
-        business_website: businessWebsite?.trim() || null,
-        business_phone: businessPhone?.trim() || null,
-        business_address: businessAddress?.trim() || null,
-        notification_opt_in: Boolean(notificationOptIn),
-        onboarding_complete: true,
-        active_workspace_id: ws.id,
-      })
-      .eq("id", userId);
+    // 3) (Optional) Save business info if you have a table for it
+    // If you don't have a "workspace_settings" or similar table yet, this is safe to skip.
+    // If you DO have a table, uncomment and adjust columns/table name.
 
-    if (profErr) {
-      return new NextResponse(`Profile update failed: ${profErr.message}`, {
-        status: 400,
-      });
+    /*
+    const { error: infoErr } = await supabase.from("workspace_settings").insert({
+      workspace_id: workspace.id,
+      website,
+      phone,
+      address,
+    });
+    if (infoErr) {
+      return new NextResponse(`Business info save failed: ${infoErr.message}`, { status: 400 });
     }
+    */
 
-    // 4) Create invites (records only; emailing later)
-    if (Array.isArray(invites) && invites.length > 0) {
-      const cleaned = invites
-        .map((i) => ({
-          workspace_id: ws.id,
-          email: (i.email || "").trim().toLowerCase(),
-          role: i.role === "admin" ? "admin" : "member",
+    // 4) (Optional) Create invite rows (does NOT email yet — that comes later)
+    // Only run this if you already have a workspace_invites table.
+    // If you don't have it, leave it disabled.
+    //
+    // Expected shape:
+    // workspace_invites: { id, workspace_id, email, role, invited_by, created_at, accepted_at }
+    //
+    // If you already created it, uncomment this block.
+
+    /*
+    const normalizedInvites = invites
+      .map((i: any) => ({
+        email: String(i?.email ?? "").trim().toLowerCase(),
+        role: i?.role === "admin" ? "admin" : "member",
+      }))
+      .filter((i: any) => i.email);
+
+    if (normalizedInvites.length > 0) {
+      const { error: invErr } = await supabase.from("workspace_invites").insert(
+        normalizedInvites.map((i: any) => ({
+          workspace_id: workspace.id,
+          email: i.email,
+          role: i.role,
+          invited_by: user.id,
         }))
-        .filter((i) => i.email.includes("@"));
+      );
 
-      if (cleaned.length > 0) {
-        // Generate tokens in app (simple random token)
-        const rows = cleaned.map((i) => ({
-          ...i,
-          token: crypto.randomUUID().replace(/-/g, ""),
-          created_by: userId,
-        }));
-
-        const { error: invErr } = await supabase
-          .from("workspace_invites")
-          .insert(rows);
-
-        if (invErr) {
-          return new NextResponse(`Invites create failed: ${invErr.message}`, {
-            status: 400,
-          });
-        }
+      if (invErr) {
+        return new NextResponse(`Invites create failed: ${invErr.message}`, { status: 400 });
       }
     }
+    */
 
-    return NextResponse.json({ ok: true, workspaceId: ws.id });
+    return NextResponse.json({
+      ok: true,
+      workspace,
+      saved: {
+        businessName,
+        website,
+        phone,
+        address,
+      },
+    });
   } catch (e: any) {
-    return new NextResponse(e?.message ?? "Unknown error", { status: 500 });
+    return new NextResponse(e?.message ?? "Server error", { status: 500 });
   }
 }
